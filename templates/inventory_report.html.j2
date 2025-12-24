@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Asset Inventory Report - {{ report_date }}</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+        h2 { color: #34495e; margin-top: 30px; }
+        .host-card { background: white; border-radius: 8px; padding: 20px; margin: 20px 0; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .host-header { background: #3498db; color: white; padding: 15px; margin: -20px -20px 20px -20px; border-radius: 8px 8px 0 0; }
+        .section { margin: 15px 0; padding: 15px; background: #f9f9f9; border-radius: 5px; }
+        .section-title { font-weight: bold; color: #2980b9; margin-bottom: 10px; }
+        table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+        th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background: #ecf0f1; color: #2c3e50; }
+        .status-ok { color: #27ae60; font-weight: bold; }
+        .status-warn { color: #f39c12; font-weight: bold; }
+        .status-critical { color: #e74c3c; font-weight: bold; }
+        .tag { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 12px; margin: 2px; }
+        .tag-os { background: #3498db; color: white; }
+        .tag-vm { background: #9b59b6; color: white; }
+        .tag-physical { background: #27ae60; color: white; }
+        .summary-box { display: inline-block; padding: 20px; margin: 10px; background: white; border-radius: 8px; text-align: center; min-width: 150px; }
+        .summary-number { font-size: 36px; font-weight: bold; color: #3498db; }
+        .summary-label { color: #7f8c8d; }
+        .progress-bar { background: #ecf0f1; border-radius: 5px; height: 20px; }
+        .progress-fill { background: #3498db; height: 100%; border-radius: 5px; }
+        .progress-fill.warning { background: #f39c12; }
+        .progress-fill.critical { background: #e74c3c; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🖥️ Linux Asset Inventory Report</h1>
+        <p><strong>Generated:</strong> {{ report_date }} | <strong>Total Hosts:</strong> {{ hosts | length }}</p>
+        
+        <div style="text-align: center;">
+            <div class="summary-box">
+                <div class="summary-number">{{ hosts | length }}</div>
+                <div class="summary-label">Total Hosts</div>
+            </div>
+            <div class="summary-box">
+                <div class="summary-number">{{ total_vcpus }}</div>
+                <div class="summary-label">Total vCPUs</div>
+            </div>
+            <div class="summary-box">
+                <div class="summary-number">{{ (total_memory / 1024) | round(1) }}</div>
+                <div class="summary-label">Total RAM (GB)</div>
+            </div>
+            <div class="summary-box">
+                <div class="summary-number">{{ total_storage | round(1) }}</div>
+                <div class="summary-label">Total Storage (TB)</div>
+            </div>
+        </div>
+
+        {% for host in hosts %}
+        <div class="host-card">
+            <div class="host-header">
+                <h2 style="margin: 0; color: white;">{{ host.hostname }}</h2>
+                <span class="tag tag-os">{{ host.os }} {{ host.os_version }}</span>
+                <span class="tag {% if host.virtualization == 'physical' %}tag-physical{% else %}tag-vm{% endif %}">
+                    {{ host.virtualization }}
+                </span>
+            </div>
+
+            <div class="section">
+                <div class="section-title">📋 System Information</div>
+                <table>
+                    <tr><td width="200">Hostname</td><td>{{ host.hostname }}</td></tr>
+                    <tr><td>FQDN</td><td>{{ host.fqdn }}</td></tr>
+                    <tr><td>IP Address</td><td>{{ host.ip }}</td></tr>
+                    <tr><td>MAC Address</td><td>{{ host.mac }}</td></tr>
+                    <tr><td>Serial Number</td><td>{{ host.serial }}</td></tr>
+                    <tr><td>Kernel</td><td>{{ host.kernel }}</td></tr>
+                    <tr><td>Architecture</td><td>{{ host.arch }}</td></tr>
+                </table>
+            </div>
+
+            <div class="section">
+                <div class="section-title">⚙️ Hardware</div>
+                <table>
+                    <tr><td width="200">CPU</td><td>{{ host.cpu }}</td></tr>
+                    <tr><td>Cores / vCPUs</td><td>{{ host.cores }} / {{ host.vcpus }}</td></tr>
+                    <tr>
+                        <td>Memory</td>
+                        <td>
+                            {{ host.memory_used_mb }} / {{ host.memory_total_mb }} MB ({{ host.memory_percent }}%)
+                            <div class="progress-bar">
+                                <div class="progress-fill {% if host.memory_percent > 90 %}critical{% elif host.memory_percent > 75 %}warning{% endif %}" 
+                                     style="width: {{ host.memory_percent }}%"></div>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr><td>Swap</td><td>{{ host.swap_mb }} MB</td></tr>
+                </table>
+            </div>
+
+            <div class="section">
+                <div class="section-title">💾 Storage</div>
+                <table>
+                    <tr><th>Mount</th><th>Device</th><th>Type</th><th>Size</th><th>Used</th><th>Usage</th></tr>
+                    {% for disk in host.disks %}
+                    <tr>
+                        <td>{{ disk.mount }}</td>
+                        <td>{{ disk.device }}</td>
+                        <td>{{ disk.fstype }}</td>
+                        <td>{{ disk.size_gb }} GB</td>
+                        <td>{{ disk.used_gb }} GB</td>
+                        <td>
+                            <div class="progress-bar" style="width: 100px; display: inline-block;">
+                                <div class="progress-fill {% if disk.percent > 90 %}critical{% elif disk.percent > 75 %}warning{% endif %}" 
+                                     style="width: {{ disk.percent }}%"></div>
+                            </div>
+                            {{ disk.percent }}%
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            </div>
+
+            <div class="section">
+                <div class="section-title">🔒 Security Status</div>
+                <table>
+                    <tr>
+                        <td width="200">SELinux/AppArmor</td>
+                        <td class="{% if host.selinux == 'Enforcing' or host.apparmor == 'Enabled' %}status-ok{% else %}status-warn{% endif %}">
+                            {{ host.selinux | default(host.apparmor) }}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>Firewall</td>
+                        <td class="{% if host.firewall == 'active' %}status-ok{% else %}status-warn{% endif %}">
+                            {{ host.firewall }}
+                        </td>
+                    </tr>
+                    <tr><td>Open Ports</td><td>{{ host.open_ports }}</td></tr>
+                    <tr><td>Installed Packages</td><td>{{ host.packages }}</td></tr>
+                    <tr><td>Running Services</td><td>{{ host.services }}</td></tr>
+                </table>
+            </div>
+
+            <div class="section">
+                <div class="section-title">📊 Status</div>
+                <table>
+                    <tr><td width="200">Uptime</td><td>{{ host.uptime }}</td></tr>
+                    <tr><td>Load Average</td><td>{{ host.load_1m }}, {{ host.load_5m }}, {{ host.load_15m }}</td></tr>
+                    <tr>
+                        <td>Reboot Required</td>
+                        <td class="{% if host.reboot_required %}status-warn{% else %}status-ok{% endif %}">
+                            {{ 'Yes' if host.reboot_required else 'No' }}
+                        </td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+        {% endfor %}
+
+        <footer style="text-align: center; padding: 20px; color: #7f8c8d;">
+            Generated by Ansible Asset Inventory Playbook | Security Team
+        </footer>
+    </div>
+</body>
+</html>

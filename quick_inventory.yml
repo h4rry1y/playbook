@@ -1,0 +1,67 @@
+---
+# Playbook: Quick Linux Asset Inventory
+# Purpose: Thu thập nhanh thông tin cơ bản
+# Usage: ansible-playbook -i inventory quick_inventory.yml
+
+- name: Quick Linux Asset Inventory
+  hosts: all
+  gather_facts: yes
+  become: yes
+  
+  tasks:
+    - name: Quick Asset Summary
+      debug:
+        msg: |
+          ┌─────────────────────────────────────────────────────────────────┐
+          │ ASSET: {{ ansible_hostname | upper }}
+          ├─────────────────────────────────────────────────────────────────┤
+          │ SYSTEM
+          │   OS:           {{ ansible_distribution }} {{ ansible_distribution_version }}
+          │   Kernel:       {{ ansible_kernel }}
+          │   Arch:         {{ ansible_architecture }}
+          │   Serial:       {{ ansible_product_serial | default('N/A') }}
+          │   Type:         {{ ansible_virtualization_type | default('physical') }}
+          ├─────────────────────────────────────────────────────────────────┤
+          │ HARDWARE
+          │   CPU:          {{ ansible_processor[2] | default(ansible_processor[1]) }}
+          │   Cores/vCPUs:  {{ ansible_processor_cores }}/{{ ansible_processor_vcpus }}
+          │   RAM:          {{ ansible_memtotal_mb }} MB
+          │   Swap:         {{ ansible_swaptotal_mb }} MB
+          ├─────────────────────────────────────────────────────────────────┤
+          │ NETWORK
+          │   IP:           {{ ansible_default_ipv4.address | default('N/A') }}
+          │   MAC:          {{ ansible_default_ipv4.macaddress | default('N/A') }}
+          │   Gateway:      {{ ansible_default_ipv4.gateway | default('N/A') }}
+          │   Interface:    {{ ansible_default_ipv4.interface | default('N/A') }}
+          ├─────────────────────────────────────────────────────────────────┤
+          │ STORAGE
+          {% for mount in ansible_mounts[:5] %}
+          │   {{ mount.mount }}: {{ (mount.size_total / 1073741824) | round(1) }}GB ({{ mount.fstype }})
+          {% endfor %}
+          └─────────────────────────────────────────────────────────────────┘
+
+    - name: Export to CSV (one-liner per host)
+      set_fact:
+        csv_line: "{{ ansible_hostname }},{{ ansible_default_ipv4.address | default('N/A') }},{{ ansible_default_ipv4.macaddress | default('N/A') }},{{ ansible_distribution }},{{ ansible_distribution_version }},{{ ansible_kernel }},{{ ansible_processor_vcpus }},{{ ansible_memtotal_mb }},{{ ansible_product_serial | default('N/A') }},{{ ansible_virtualization_type | default('physical') }}"
+
+    - name: Save quick inventory CSV
+      lineinfile:
+        path: "/tmp/quick_inventory.csv"
+        line: "{{ csv_line }}"
+        create: yes
+      delegate_to: localhost
+      become: no
+
+    - name: Add CSV header (run once)
+      lineinfile:
+        path: "/tmp/quick_inventory.csv"
+        line: "Hostname,IP,MAC,OS,Version,Kernel,vCPUs,RAM_MB,Serial,Type"
+        insertbefore: BOF
+      delegate_to: localhost
+      run_once: true
+      become: no
+
+    - name: Show CSV location
+      debug:
+        msg: "CSV saved to: /tmp/quick_inventory.csv"
+      run_once: true

@@ -1,0 +1,323 @@
+---
+# Playbook: Security-Focused Asset Inventory
+# Purpose: Thu thập thông tin bảo mật cho Security Assessment
+# Author: Security Team
+# Usage: ansible-playbook -i inventory security_inventory.yml
+
+- name: Security Asset Inventory Collection
+  hosts: all
+  gather_facts: yes
+  become: yes
+  
+  vars:
+    report_dir: "/tmp/security_inventory"
+    
+  tasks:
+    - name: Create report directory
+      file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+      become: no
+
+    # ============================================
+    # SECURITY BASELINE CHECKS
+    # ============================================
+    
+    - name: Check SELinux/AppArmor status
+      block:
+        - name: SELinux status
+          shell: getenforce 2>/dev/null || echo "Not Installed"
+          register: selinux_check
+          changed_when: false
+          when: ansible_os_family == "RedHat"
+          
+        - name: AppArmor status
+          shell: aa-status --enabled 2>/dev/null && echo "Enabled" || echo "Disabled"
+          register: apparmor_check
+          changed_when: false
+          when: ansible_os_family == "Debian"
+
+    - name: Check firewall status
+      block:
+        - name: Firewalld status
+          shell: |
+            systemctl is-active firewalld 2>/dev/null || echo "inactive"
+          register: firewalld_check
+          changed_when: false
+          
+        - name: UFW status
+          shell: ufw status | head -1 2>/dev/null || echo "Not Installed"
+          register: ufw_check
+          changed_when: false
+          
+        - name: IPTables rules count
+          shell: iptables -L -n 2>/dev/null | wc -l
+          register: iptables_check
+          changed_when: false
+
+    # ============================================
+    # SSH HARDENING CHECKS
+    # ============================================
+    
+    - name: SSH Configuration audit
+      shell: |
+        echo "=== SSH Security Configuration ==="
+        echo "PermitRootLogin: $(grep -E '^PermitRootLogin' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo 'not set')"
+        echo "PasswordAuthentication: $(grep -E '^PasswordAuthentication' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo 'not set')"
+        echo "PubkeyAuthentication: $(grep -E '^PubkeyAuthentication' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo 'not set')"
+        echo "PermitEmptyPasswords: $(grep -E '^PermitEmptyPasswords' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo 'not set')"
+        echo "Protocol: $(grep -E '^Protocol' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo 'not set')"
+        echo "MaxAuthTries: $(grep -E '^MaxAuthTries' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo 'not set')"
+        echo "X11Forwarding: $(grep -E '^X11Forwarding' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo 'not set')"
+        echo "AllowTcpForwarding: $(grep -E '^AllowTcpForwarding' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo 'not set')"
+      register: ssh_audit
+      changed_when: false
+
+    # ============================================
+    # USER & ACCESS AUDIT
+    # ============================================
+    
+    - name: Users with UID 0 (root equivalent)
+      shell: awk -F':' '$3 == 0 {print $1}' /etc/passwd
+      register: uid0_users
+      changed_when: false
+
+    - name: Users with empty passwords
+      shell: awk -F':' '($2 == "" || $2 == "!" || $2 == "*") {print $1}' /etc/shadow 2>/dev/null || echo "Access denied"
+      register: empty_password_users
+      changed_when: false
+      
+    - name: Sudoers configuration
+      shell: |
+        echo "=== /etc/sudoers entries (non-comment) ==="
+        grep -v '^#' /etc/sudoers 2>/dev/null | grep -v '^$' | head -20
+        echo ""
+        echo "=== /etc/sudoers.d/ files ==="
+        ls -la /etc/sudoers.d/ 2>/dev/null || echo "No sudoers.d"
+      register: sudoers_audit
+      changed_when: false
+
+    - name: Users with sudo/wheel access
+      shell: |
+        getent group sudo wheel 2>/dev/null | cut -d: -f4 | tr ',' '\n' | sort -u
+      register: sudo_wheel_users
+      changed_when: false
+
+    - name: Check for unauthorized SUID/SGID files
+      shell: |
+        find /usr /bin /sbin -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null | head -30
+      register: suid_files
+      changed_when: false
+
+    # ============================================
+    # NETWORK SECURITY
+    # ============================================
+    
+    - name: Listening ports and services
+      shell: |
+        ss -tulnp 2>/dev/null | grep LISTEN | awk '{print $1, $5, $7}' | sort
+      register: listening_services
+      changed_when: false
+
+    - name: Check for world-accessible ports
+      shell: |
+        ss -tulnp 2>/dev/null | grep LISTEN | grep -E '0\.0\.0\.0|::' | awk '{print $5, $7}'
+      register: world_accessible_ports
+      changed_when: false
+
+    - name: Network connections summary
+      shell: |
+        ss -s 2>/dev/null
+      register: network_summary
+      changed_when: false
+
+    # ============================================
+    # PATCH & VULNERABILITY STATUS
+    # ============================================
+    
+    - name: Check pending security updates (RHEL/CentOS)
+      shell: yum updateinfo list security 2>/dev/null | tail -20 || echo "N/A"
+      register: rhel_security_updates
+      changed_when: false
+      when: ansible_os_family == "RedHat"
+
+    - name: Check pending security updates (Debian/Ubuntu)
+      shell: |
+        apt list --upgradable 2>/dev/null | grep -i security | head -20 || echo "N/A"
+      register: debian_security_updates
+      changed_when: false
+      when: ansible_os_family == "Debian"
+
+    - name: Check kernel version
+      shell: |
+        echo "Running: $(uname -r)"
+        echo "Available: $(rpm -q kernel 2>/dev/null | tail -1 || dpkg -l linux-image-* 2>/dev/null | grep ^ii | tail -1 | awk '{print $2}')"
+      register: kernel_status
+      changed_when: false
+
+    # ============================================
+    # LOGGING & AUDITING
+    # ============================================
+    
+    - name: Check auditd status
+      shell: |
+        systemctl is-active auditd 2>/dev/null || echo "not running"
+      register: auditd_status
+      changed_when: false
+
+    - name: Check rsyslog/syslog status
+      shell: |
+        systemctl is-active rsyslog 2>/dev/null || systemctl is-active syslog 2>/dev/null || echo "not running"
+      register: syslog_status
+      changed_when: false
+
+    - name: Log retention check
+      shell: |
+        echo "=== Logrotate config ==="
+        grep -E 'rotate|weekly|monthly' /etc/logrotate.conf 2>/dev/null | head -10
+      register: logrotate_check
+      changed_when: false
+
+    # ============================================
+    # COMPLIANCE CHECKS
+    # ============================================
+    
+    - name: Password policy check
+      shell: |
+        echo "=== /etc/login.defs ==="
+        grep -E '^PASS_MAX_DAYS|^PASS_MIN_DAYS|^PASS_MIN_LEN|^PASS_WARN_AGE' /etc/login.defs 2>/dev/null
+        echo ""
+        echo "=== PAM password policy ==="
+        grep -E 'pam_pwquality|pam_cracklib' /etc/pam.d/system-auth /etc/pam.d/common-password 2>/dev/null | head -5
+      register: password_policy
+      changed_when: false
+
+    - name: File permissions on sensitive files
+      shell: |
+        echo "=== Sensitive File Permissions ==="
+        ls -la /etc/passwd /etc/shadow /etc/group /etc/gshadow /etc/sudoers 2>/dev/null
+        echo ""
+        echo "=== SSH directory permissions ==="
+        ls -la /etc/ssh/ 2>/dev/null | head -10
+      register: file_permissions
+      changed_when: false
+
+    - name: Check for world-writable files
+      shell: |
+        find /etc /var -type f -perm -002 2>/dev/null | head -20
+      register: world_writable
+      changed_when: false
+
+    # ============================================
+    # GENERATE SECURITY REPORT
+    # ============================================
+    
+    - name: Security Assessment Summary
+      debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════════╗
+          ║  SECURITY INVENTORY REPORT - {{ ansible_hostname | upper }}
+          ║  Collection Date: {{ ansible_date_time.iso8601 }}
+          ╠══════════════════════════════════════════════════════════════════════╣
+          ║  SYSTEM OVERVIEW
+          ║  ────────────────
+          ║  Hostname:     {{ ansible_hostname }}
+          ║  IP:           {{ ansible_default_ipv4.address | default('N/A') }}
+          ║  OS:           {{ ansible_distribution }} {{ ansible_distribution_version }}
+          ║  Kernel:       {{ ansible_kernel }}
+          ╠══════════════════════════════════════════════════════════════════════╣
+          ║  SECURITY CONTROLS
+          ║  ─────────────────
+          ║  SELinux:      {{ selinux_check.stdout | default('N/A') }}
+          ║  AppArmor:     {{ apparmor_check.stdout | default('N/A') }}
+          ║  Firewalld:    {{ firewalld_check.stdout }}
+          ║  UFW:          {{ ufw_check.stdout }}
+          ║  IPTables:     {{ iptables_check.stdout }} rules
+          ║  Auditd:       {{ auditd_status.stdout }}
+          ║  Syslog:       {{ syslog_status.stdout }}
+          ╠══════════════════════════════════════════════════════════════════════╣
+          ║  ACCESS CONTROL
+          ║  ──────────────
+          ║  UID 0 users:  {{ uid0_users.stdout_lines | join(', ') }}
+          ║  Sudo users:   {{ sudo_wheel_users.stdout_lines | join(', ') }}
+          ║  SUID files:   {{ suid_files.stdout_lines | length }} found
+          ╠══════════════════════════════════════════════════════════════════════╣
+          ║  NETWORK EXPOSURE
+          ║  ────────────────
+          ║  Listening ports:     {{ listening_services.stdout_lines | length }}
+          ║  World-accessible:    {{ world_accessible_ports.stdout_lines | length }}
+          ╠══════════════════════════════════════════════════════════════════════╣
+          ║  SSH CONFIGURATION
+          ║  ─────────────────
+          {{ ssh_audit.stdout | indent(10, False) }}
+          ╠══════════════════════════════════════════════════════════════════════╣
+          ║  PASSWORD POLICY
+          ║  ───────────────
+          {{ password_policy.stdout | indent(10, False) }}
+          ╚══════════════════════════════════════════════════════════════════════╝
+
+    - name: Save security inventory to JSON
+      copy:
+        content: |
+          {
+            "host": "{{ ansible_hostname }}",
+            "collection_date": "{{ ansible_date_time.iso8601 }}",
+            "ip_address": "{{ ansible_default_ipv4.address | default('N/A') }}",
+            "os": "{{ ansible_distribution }} {{ ansible_distribution_version }}",
+            "kernel": "{{ ansible_kernel }}",
+            "security_controls": {
+              "selinux": "{{ selinux_check.stdout | default('N/A') }}",
+              "apparmor": "{{ apparmor_check.stdout | default('N/A') }}",
+              "firewalld": "{{ firewalld_check.stdout }}",
+              "ufw": "{{ ufw_check.stdout }}",
+              "iptables_rules": {{ iptables_check.stdout | int }},
+              "auditd": "{{ auditd_status.stdout }}",
+              "syslog": "{{ syslog_status.stdout }}"
+            },
+            "access_control": {
+              "uid0_users": {{ uid0_users.stdout_lines | to_json }},
+              "sudo_users": {{ sudo_wheel_users.stdout_lines | to_json }},
+              "suid_files_count": {{ suid_files.stdout_lines | length }}
+            },
+            "network": {
+              "listening_ports_count": {{ listening_services.stdout_lines | length }},
+              "world_accessible_count": {{ world_accessible_ports.stdout_lines | length }},
+              "listening_services": {{ listening_services.stdout_lines | to_json }}
+            },
+            "ssh_config": {{ ssh_audit.stdout_lines | to_json }},
+            "vulnerabilities": {
+              "world_writable_files": {{ world_writable.stdout_lines | length }},
+              "empty_password_users": {{ empty_password_users.stdout_lines | to_json }}
+            }
+          }
+        dest: "{{ report_dir }}/{{ ansible_hostname }}_security.json"
+      delegate_to: localhost
+      become: no
+
+    - name: Generate CSV line for security summary
+      lineinfile:
+        path: "{{ report_dir }}/security_summary.csv"
+        line: "{{ ansible_hostname }},{{ ansible_default_ipv4.address | default('N/A') }},{{ ansible_distribution }},{{ selinux_check.stdout | default(apparmor_check.stdout | default('N/A')) }},{{ firewalld_check.stdout }},{{ auditd_status.stdout }},{{ listening_services.stdout_lines | length }},{{ world_accessible_ports.stdout_lines | length }},{{ suid_files.stdout_lines | length }},{{ world_writable.stdout_lines | length }}"
+        create: yes
+      delegate_to: localhost
+      become: no
+
+    - name: Add CSV header
+      lineinfile:
+        path: "{{ report_dir }}/security_summary.csv"
+        line: "Hostname,IP,OS,SELinux/AppArmor,Firewall,Auditd,Listening_Ports,World_Accessible,SUID_Files,World_Writable"
+        insertbefore: BOF
+      delegate_to: localhost
+      run_once: true
+      become: no
+
+    - name: Report location
+      debug:
+        msg: |
+          Reports saved to:
+          - JSON: {{ report_dir }}/{{ ansible_hostname }}_security.json
+          - CSV:  {{ report_dir }}/security_summary.csv
+      run_once: true
